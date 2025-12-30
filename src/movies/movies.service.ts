@@ -9,6 +9,7 @@ export class MoviesService {
     @InjectRepository(Movie)
     private readonly moviesRepo: Repository<Movie>
   ) {}
+  
 
   // Strict create: throws error if code already exists
   async createStrict(data: Partial<Movie>): Promise<Movie> {

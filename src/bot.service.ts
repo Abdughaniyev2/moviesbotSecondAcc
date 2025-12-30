@@ -768,14 +768,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   }
 
   private parseCaption(caption: string): ParsedCaption | null {
-    const lines = caption
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (!lines.length) return null;
+    // Split into lines but preserve empty lines
+    const allLines = caption.split("\n");
+    if (!allLines.length) return null;
 
-    const first = lines[0];
-    const m = first.match(/^\s*#?(\d+)\s*[-:–]*\s*(.+)$/);
+    // Trim only the first line for parsing code/title
+    const firstLine = allLines[0].trim();
+    const m = firstLine.match(/^\s*#?(\d+)\s*[-:–]*\s*(.+)$/);
     if (!m) return null;
 
     const code = m[1];
@@ -784,17 +783,30 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     let category: string | undefined;
     let description: string | undefined;
+    let descriptionStartIndex = -1;
 
-    for (let i = 1; i < lines.length; i++) {
-      const l = lines[i];
-      const cat = l.match(/^Category:\s*(.+)$/i);
+    // Find Category and Description markers
+    for (let i = 1; i < allLines.length; i++) {
+      const trimmedLine = allLines[i].trim();
+      const cat = trimmedLine.match(/^Category:\s*(.+)$/i);
       if (cat) {
         category = cat[1].trim();
         continue;
       }
-      const desc = l.match(/^Description:\s*(.+)$/i);
+      const desc = trimmedLine.match(/^Description:\s*(.+)$/i);
       if (desc) {
-        description = [desc[1], ...lines.slice(i + 1)].join("\n").trim();
+        // Found description start - preserve everything from here including empty lines and quotes
+        descriptionStartIndex = i;
+        // Get the original line to preserve quotes exactly as they are
+        const originalLine = allLines[i];
+        // Extract description part from original line (preserve quotes and formatting)
+        const descMatch = originalLine.match(/^Description:\s*(.+)$/i);
+        if (descMatch) {
+          // Get the rest of the description from original lines (including empty lines and quotes)
+          const descLines = [descMatch[1], ...allLines.slice(i + 1)];
+          // Preserve original line breaks, empty lines, and quotes
+          description = descLines.join("\n");
+        }
         break;
       }
     }
