@@ -191,13 +191,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         // Check and increment download count atomically
         const downloadCheck = await this.userService.checkAndIncrementDownload(
           telegramId,
-          10
+          5
         );
 
         if (!downloadCheck.canDownload) {
           return ctx.reply(
             `❌ Daily download limit reached!\n` +
-              `You have reached the limit of 10 movies per day.\n` +
+              `You have reached the limit of 5 movies per day.\n` +
               `Please try again tomorrow.`
           );
         }

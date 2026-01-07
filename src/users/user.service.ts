@@ -137,11 +137,11 @@ export class UserService {
     const finalCount = user.dailyDownloadCount || 0;
     const remaining = canDownload ? dailyLimit - finalCount : 0;
 
-    console.log(
-      `[DEBUG] User ${telegramId}: BEFORE=${currentCount}, AFTER=${finalCount}, limit=${dailyLimit}, canDownload=${canDownload}, date=${
-        lastDownloadStr || "null"
-      }`
-    );
+    // console.log(
+    //   `[DEBUG] User ${telegramId}: BEFORE=${currentCount}, AFTER=${finalCount}, limit=${dailyLimit}, canDownload=${canDownload}, date=${
+    //     lastDownloadStr || "null"
+    //   }`
+    // ); 
 
     return {
       canDownload,
