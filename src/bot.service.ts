@@ -191,7 +191,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         // Check and increment download count atomically
         const downloadCheck = await this.userService.checkAndIncrementDownload(
           telegramId,
-          5
+          100
         );
 
         if (!downloadCheck.canDownload) {
@@ -322,8 +322,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       if (added.length) {
         ctx.reply(
-          `✅ Force-join channels added: ${added.join(", ")}\n` +
-            `📌 Current list: ${this.forceJoinChannels.join(", ")}`
+          `✅ Force-join channels added: ${added.join(",\n")}\n\n` +
+            `📌 Current list: \n${this.forceJoinChannels.join(",\n")}`
         );
       } else {
         ctx.reply("⚠️ No new channels added, all are already in the list.");
@@ -571,12 +571,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         notJoined.push(ch);
       }
     }
-
+    
+    
     if (notJoined.length) {
+      const channelsList = notJoined.map((ch, i) => `Channel ${i + 1}: ${ch}`).join("\n");
       await ctx.reply(
-        `❌ You haven't joined the following channels yet: ${notJoined.join(
-          ", "
-        )}\n` + `✅ Please join the channels and try again.`
+        `❌ You haven't joined the channels below:  \n\n${channelsList}\n\n` +
+          `✅ Please join the channels and try again.`
       );
       return false;
     }
