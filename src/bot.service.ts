@@ -213,13 +213,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           case "photo":
             await ctx.replyWithPhoto(movie.fileId, {
               caption,
-              protect_content: true,
+              protect_content: false,
             });
             break;
           case "video":
             await ctx.replyWithVideo(movie.fileId, {
               caption,
-              protect_content: true,
+              protect_content: false,
             });
             break;
           case "document":
