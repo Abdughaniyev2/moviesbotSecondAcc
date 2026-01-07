@@ -12,6 +12,7 @@ type ParsedCaption = {
   title: string;
   category?: string;
   description?: string;
+  descriptionStartOffset?: number;
 };
 
 const owner = Number(process.env.ADMIN);
@@ -96,6 +97,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           return;
         }
 
+        // If description exists, convert it to HTML to preserve formatting (quotes, bold, etc.)
+        if (
+          parsed.description &&
+          parsed.descriptionStartOffset !== undefined &&
+          post.caption_entities
+        ) {
+          const start = parsed.descriptionStartOffset;
+          const descText = caption.substring(start);
+          // Filter entities that belong to the description and adjust their offset
+          const descEntities = post.caption_entities
+            .filter((e: any) => e.offset >= start)
+            .map((e: any) => ({ ...e, offset: e.offset - start }));
+          parsed.description = this.toHtml(descText, descEntities);
+        }
+
         const exists = await this.moviesService.findByCode(parsed.code);
         if (exists) {
           await this.notifyOwner(
@@ -150,9 +166,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         // caption → join remaining arguments
         const caption =
           args.slice(1).join(" ") ||
-          `🎬 ${movie.title}\n🏷 ${movie.category ?? "Unknown"}\n${
-            movie.description ?? ""
-          }`;
+          `🎬 ${this.escapeHtml(movie.title)}\n🏷 ${this.escapeHtml(
+            movie.category ?? "Unknown"
+          )}\n\n${movie.description ?? ""}`;
 
         ctx.reply(`📢 Sending movie #${code}...`);
 
@@ -204,7 +220,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       try {
-        const caption = `🎬 ${movie.title}\n🏷 ${movie.category ?? "Unknown"}\n${
+        const caption = `🎬 ${this.escapeHtml(
+          movie.title
+        )}\n🏷 ${this.escapeHtml(movie.category ?? "Unknown")}\n\n${
           movie.description ?? ""
         }`;
 
@@ -214,12 +232,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
             await ctx.replyWithPhoto(movie.fileId, {
               caption,
               protect_content: false,
+              parse_mode: "HTML",
             });
             break;
           case "video":
             await ctx.replyWithVideo(movie.fileId, {
               caption,
               protect_content: false,
+              parse_mode: "HTML",
             });
             break;
           case "document":
@@ -227,6 +247,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
             await ctx.replyWithDocument(movie.fileId, {
               caption,
               protect_content: true,
+              parse_mode: "HTML",
             });
             break;
         }
@@ -768,6 +789,68 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     console.log(`📥 ${this.knownUsers.size} users cached`);
   }
 
+  private escapeHtml(unsafe: string): string {
+    return unsafe
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  private toHtml(text: string, entities: any[]): string {
+    if (!entities || !entities.length) return this.escapeHtml(text);
+
+    const points: { idx: number; val: string; type: "open" | "close"; order: number }[] = [];
+
+    entities.forEach((e) => {
+      let tag = "";
+      switch (e.type) {
+        case "bold": tag = "b"; break;
+        case "italic": tag = "i"; break;
+        case "underline": tag = "u"; break;
+        case "strikethrough": tag = "s"; break;
+        case "code": tag = "code"; break;
+        case "pre": tag = "pre"; break;
+        case "spoiler": tag = "tg-spoiler"; break;
+        case "blockquote": tag = "blockquote"; break;
+        case "text_link": tag = "a"; break;
+      }
+      if (!tag) return;
+
+      const open = e.type === "text_link" ? `<a href="${e.url}">` : `<${tag}>`;
+      const close = e.type === "text_link" ? "</a>" : `</${tag}>`;
+
+      // Priority: Close tags before Open tags at same index
+      // Within Open: Outer (longer) before Inner (shorter)
+      // Within Close: Inner (shorter) before Outer (longer) - though usually same index means same scope end
+      points.push({ idx: e.offset, val: open, type: "open", order: -e.length });
+      points.push({ idx: e.offset + e.length, val: close, type: "close", order: e.length });
+    });
+
+    points.sort((a, b) => {
+      if (a.idx !== b.idx) return a.idx - b.idx;
+      // Close tags (type='close') should come before Open tags (type='open')
+      if (a.type !== b.type) return a.type === "close" ? -1 : 1;
+      return a.order - b.order;
+    });
+
+    let result = "";
+    let cursor = 0;
+
+    for (const p of points) {
+      if (p.idx > cursor) {
+        result += this.escapeHtml(text.substring(cursor, p.idx));
+        cursor = p.idx;
+      }
+      result += p.val;
+    }
+    if (cursor < text.length) {
+      result += this.escapeHtml(text.substring(cursor));
+    }
+    return result;
+  }
+
   private parseCaption(caption: string): ParsedCaption | null {
     // Split into lines but preserve empty lines
     const allLines = caption.split("\n");
@@ -785,13 +868,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     let category: string | undefined;
     let description: string | undefined;
     let descriptionStartIndex = -1;
+    let currentOffset = 0;
 
     // Find Category and Description markers
-    for (let i = 1; i < allLines.length; i++) {
+    for (let i = 0; i < allLines.length; i++) {
+      // Skip first line (title/code) for detection, but track offset
+      if (i === 0) {
+        currentOffset += allLines[i].length + 1; // +1 for \n
+        continue;
+      }
+
       const trimmedLine = allLines[i].trim();
       const cat = trimmedLine.match(/^Category:\s*(.+)$/i);
       if (cat) {
         category = cat[1].trim();
+        currentOffset += allLines[i].length + 1;
         continue;
       }
       const desc = trimmedLine.match(/^Description:\s*(.+)$/i);
@@ -807,9 +898,37 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           const descLines = [descMatch[1], ...allLines.slice(i + 1)];
           // Preserve original line breaks, empty lines, and quotes
           description = descLines.join("\n");
+
+          // Calculate character offset where description content starts
+          // currentOffset points to start of "Description: ..." line
+          // We add the length of "Description: " prefix
+          const prefixMatch = originalLine.match(/^Description:\s*/i);
+          if (prefixMatch) {
+            // Add offset of the prefix
+            // Note: descriptionStartOffset is used to slice the original full caption
+            // parsed.descriptionStartOffset = currentOffset + prefixMatch[0].length;
+            // Actually, let's store the offset relative to the full caption
+            // We need to be careful about \n chars. split('\n') consumes them.
+            // currentOffset tracks them.
+            
+            // The logic below for descriptionStartOffset:
+            // currentOffset is the index of the start of this line.
+            // prefixMatch[0].length is the length of "Description: "
+            // So content starts at currentOffset + prefixMatch[0].length
+            
+            // We return this so channel_post can slice the raw caption and entities
+            return { 
+              code, 
+              title, 
+              category, 
+              description, 
+              descriptionStartOffset: currentOffset + prefixMatch[0].length 
+            };
+          }
         }
         break;
       }
+      currentOffset += allLines[i].length + 1;
     }
 
     return { code, title, category, description };

@@ -38,11 +38,11 @@ export class WatchlistService {
         const list = movies
             .filter((m): m is NonNullable<typeof m> => !!m)
       .map(
-        (m) => `- ${m.code} ${m.title}${m.category ? ` (${m.category})` : ""}`
+        (m) => `• Code: ${m.code} \n• ${m.title}\n${m.category ? `• ${m.category}\n\n` : ""}`
       )
       .join("\n");
 
-    return `🎬 Your watchlist:\n${list}`;
+    return `🎬 Your watchlist\n\n${list}`;
   }
 
   async removeFromWatchlist(
