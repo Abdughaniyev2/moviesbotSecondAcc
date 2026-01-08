@@ -26,6 +26,19 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private forceJoinActive = false;
   private forceJoinChannels: string[] = [];
 
+  private dailyLimit = 2;
+  private userDownloads = new Map<
+    number,
+    {
+      downloadsToday: number;
+      lastResetDate: string;
+      customLimit?: number;
+      customLimitExpires?: Date;
+      customProtectContent?: boolean;
+      customProtectContentExpires?: Date;
+    }
+  >();
+
   constructor(
     private readonly moviesService: MoviesService,
     private readonly watchlistService: WatchlistService,
@@ -201,21 +214,66 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       // Check daily download limit (only for non-admins)
       if (!isAdmin) {
-        const telegramId = ctx.from.id.toString();
-        await this.userService.saveIfNotExists(telegramId, ctx.from.username);
+        const userId = ctx.from.id;
+        const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 
-        // Check and increment download count atomically
-        const downloadCheck = await this.userService.checkAndIncrementDownload(
-          telegramId,
-          100
-        );
+        let stats = this.userDownloads.get(userId);
+        if (!stats || stats.lastResetDate !== today) {
+          const customLimit = stats?.customLimit;
+          const customLimitExpires = stats?.customLimitExpires;
+          const customProtectContent = stats?.customProtectContent;
+          const customProtectContentExpires = stats?.customProtectContentExpires;
+          stats = {
+            downloadsToday: 0,
+            lastResetDate: today,
+            customLimit,
+            customLimitExpires,
+            customProtectContent,
+            customProtectContentExpires,
+          };
+          this.userDownloads.set(userId, stats);
+        }
 
-        if (!downloadCheck.canDownload) {
+        let currentLimit = this.dailyLimit;
+        if (
+          stats.customLimit &&
+          stats.customLimitExpires &&
+          stats.customLimitExpires > new Date()
+        ) {
+          currentLimit = stats.customLimit;
+        } else if (stats.customLimit) {
+          // Clean up expired custom limit
+          delete stats.customLimit;
+          delete stats.customLimitExpires;
+        }
+
+        if (stats.downloadsToday >= currentLimit) {
           return ctx.reply(
-            `❌ Daily download limit reached!\n` +
-              `You have reached the limit of 5 movies per day.\n` +
-              `Please try again tomorrow.`
+            `<b>Daily limit reached! 🚩</b> \nYour limit  is  ${currentLimit} movies per day.\nPlease try again tomorrow...✅\n\n<b>Want more access?</b> \nExtend your limit to  7  movies/day \nand enable Download mode by contacting the admin via /help.\n\n<blockquote>Higher Daily Limit (7 days) - $1.50.</blockquote>\n<blockquote>Download Access (7 days) - $1.50.</blockquote>`,
+            { parse_mode: "HTML" }
           );
+        }
+       
+
+        stats.downloadsToday++;
+        await this.userService.saveIfNotExists(userId.toString(), ctx.from.username);
+      }
+
+      // Determine protect_content setting
+      let protectContent = true; // Default: protected
+
+      if (isAdmin) {
+        protectContent = false;
+      } else {
+        const userId = ctx.from.id;
+        const stats = this.userDownloads.get(userId);
+        if (stats?.customProtectContent === false) {
+          if (stats.customProtectContentExpires && stats.customProtectContentExpires > new Date()) {
+            protectContent = false;
+          } else if (stats) {
+            delete stats.customProtectContent;
+            delete stats.customProtectContentExpires;
+          }
         }
       }
 
@@ -231,14 +289,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           case "photo":
             await ctx.replyWithPhoto(movie.fileId, {
               caption,
-              protect_content: false,
+              protect_content: protectContent,
               parse_mode: "HTML",
             });
             break;
           case "video":
             await ctx.replyWithVideo(movie.fileId, {
               caption,
-              protect_content: false,
+              protect_content: protectContent,
               parse_mode: "HTML",
             });
             break;
@@ -246,7 +304,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           default:
             await ctx.replyWithDocument(movie.fileId, {
               caption,
-              protect_content: true,
+              protect_content: protectContent,
               parse_mode: "HTML",
             });
             break;
@@ -444,6 +502,129 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
     });
 
+    // ===== Daily Limit =====
+    this.bot.command("limit", async (ctx) => {
+      if (!ctx.from || !ADMINS.includes(ctx.from.id)) return;
+
+      const args = ctx.message.text.split(/\s+/);
+      if (args.length < 2) {
+        return ctx.reply(`📊 Current daily limit: ${this.dailyLimit}`);
+      }
+
+      const newLimit = parseInt(args[1], 10);
+      if (isNaN(newLimit) || newLimit < 0) {
+        return ctx.reply("⚠️ Please enter a valid number.");
+      }
+
+      this.dailyLimit = newLimit;
+      return ctx.reply(`✅ Daily limit set to ${this.dailyLimit} movies/day.`);
+    });
+
+    this.bot.command("limitup", async (ctx) => {
+      if (!ctx.from || !ADMINS.includes(ctx.from.id)) return;
+
+      const args = ctx.message.text.split(/\s+/);
+      if (args.length < 4) {
+        return ctx.reply("⚠️ Usage: /limitup @username <limit> <days>");
+      }
+
+      const target = args[1];
+      const newLimit = parseInt(args[2], 10);
+      const days = parseInt(args[3], 10);
+
+      if (isNaN(newLimit) || newLimit < 0 || isNaN(days) || days <= 0) {
+        return ctx.reply("⚠️ Invalid limit or number of days.");
+      }
+
+      const users = await this.userService.findAll();
+      let user = null;
+
+      if (/^\d+$/.test(target)) {
+        // If target is a number, assume it's a Telegram ID
+        user = users.find((u) => String(u.telegramId) === target);
+      }
+
+      if (!user) {
+        return ctx.reply(`❌ User @${user} not found in the database.`);
+      }
+
+      const userId = Number(user.telegramId);
+      const today = new Date().toISOString().split("T")[0];
+
+      const stats = this.userDownloads.get(userId) || {
+        downloadsToday: 0,
+        lastResetDate: today,
+      };
+
+      const expires = new Date();
+      expires.setDate(expires.getDate() + days);
+
+      stats.customLimit = newLimit;
+      stats.customLimitExpires = expires;
+      this.userDownloads.set(userId, stats);
+
+      return ctx.reply(`✅ Limit for ${target} has been set to ${newLimit} for ${days} day(s).\n<blockquote>Expires on: ${expires.toLocaleString()}</blockquote>`,{ parse_mode: "HTML" });
+      
+    });
+
+    this.bot.command("protecton", async (ctx) => {
+      if (!ctx.from || !ADMINS.includes(ctx.from.id)) return;
+
+      const args = ctx.message.text.split(/\s+/);
+      if (args.length < 2) {
+        return ctx.reply("⚠️ Usage: /protecton <userId>");
+      }
+
+      const userId = parseInt(args[1], 10);
+
+      if (isNaN(userId)) {
+        return ctx.reply("⚠️ Invalid User ID.");
+      }
+
+      const stats = this.userDownloads.get(userId);
+      if (stats) {
+        delete stats.customProtectContent;
+        delete stats.customProtectContentExpires;
+      }
+
+      return ctx.reply(
+        `✅ Protection ENABLED (Default) for ID ${userId}.`
+      );
+    });
+
+    this.bot.command("protectoff", async (ctx) => {
+      if (!ctx.from || !ADMINS.includes(ctx.from.id)) return;
+
+      const args = ctx.message.text.split(/\s+/);
+      if (args.length < 3) {
+        return ctx.reply("⚠️ Usage: /protectoff <userId> <days>");
+      }
+
+      const userId = parseInt(args[1], 10);
+      const days = parseInt(args[2], 10);
+
+      if (isNaN(userId) || isNaN(days) || days <= 0) {
+        return ctx.reply("⚠️ Invalid User ID or days.");
+      }
+
+      const today = new Date().toISOString().split("T")[0];
+      let stats = this.userDownloads.get(userId);
+      if (!stats) {
+        stats = { downloadsToday: 0, lastResetDate: today };
+        this.userDownloads.set(userId, stats);
+      }
+
+      const expires = new Date();
+      expires.setDate(expires.getDate() + days);
+
+      stats.customProtectContent = false;
+      stats.customProtectContentExpires = expires;
+
+      return ctx.reply(
+        `✅ Protection DISABLED (VIP) for ID ${userId} for ${days} day(s).`
+      );
+    });
+
     // ===== Stats with pagination =====
     this.bot.command("stats", async (ctx) => {
       const userId = ctx.from?.id;
@@ -552,10 +733,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     this.bot.use(async (ctx, next) => {
       if (ctx.from?.id) {
         const id = ctx.from.id.toString();
-        if (!this.knownUsers.has(id)) {
-          await this.userService.saveIfNotExists(id, ctx.from.username);
-          this.knownUsers.add(id);
-        }
+        await this.userService.saveIfNotExists(id, ctx.from.username);
+        this.knownUsers.add(id);
       }
       return next();
     });
