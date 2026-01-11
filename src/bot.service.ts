@@ -26,7 +26,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private forceJoinActive = false;
   private forceJoinChannels: string[] = [];
 
-  private dailyLimit = 2;
+  private targetChannelId: string | null = null;
+  private targetChannelMaxId: number = 0;
+
+  private dailyLimit = 3;
   private userDownloads = new Map<
     number,
     {
@@ -36,6 +39,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       customLimitExpires?: Date;
       customProtectContent?: boolean;
       customProtectContentExpires?: Date;
+      lastRandomMessageId?: number;
+      processingRandom?: boolean;
     }
   >();
 
@@ -525,30 +530,18 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       const args = ctx.message.text.split(/\s+/);
       if (args.length < 4) {
-        return ctx.reply("⚠️ Usage: /limitup @username <limit> <days>");
+        return ctx.reply("⚠️ Usage: /limitup <userId> <limit> <days>");
       }
 
-      const target = args[1];
+      const targetId = parseInt(args[1], 10);
       const newLimit = parseInt(args[2], 10);
       const days = parseInt(args[3], 10);
 
-      if (isNaN(newLimit) || newLimit < 0 || isNaN(days) || days <= 0) {
-        return ctx.reply("⚠️ Invalid limit or number of days.");
+      if (isNaN(targetId) || isNaN(newLimit) || newLimit < 0 || isNaN(days) || days <= 0) {
+        return ctx.reply("⚠️ Invalid arguments. Ensure User ID, limit, and days are numbers.");
       }
 
-      const users = await this.userService.findAll();
-      let user = null;
-
-      if (/^\d+$/.test(target)) {
-        // If target is a number, assume it's a Telegram ID
-        user = users.find((u) => String(u.telegramId) === target);
-      }
-
-      if (!user) {
-        return ctx.reply(`❌ User @${user} not found in the database.`);
-      }
-
-      const userId = Number(user.telegramId);
+      const userId = targetId;
       const today = new Date().toISOString().split("T")[0];
 
       const stats = this.userDownloads.get(userId) || {
@@ -563,7 +556,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       stats.customLimitExpires = expires;
       this.userDownloads.set(userId, stats);
 
-      return ctx.reply(`✅ Limit for ${target} has been set to ${newLimit} for ${days} day(s).\n<blockquote>Expires on: ${expires.toLocaleString()}</blockquote>`,{ parse_mode: "HTML" });
+      return ctx.reply(`✅ Limit for ID <code>${userId}</code> has been set to ${newLimit} for ${days} day(s).\n<blockquote>Expires on: ${expires.toLocaleString()}</blockquote>`,{ parse_mode: "HTML" });
       
     });
 
@@ -706,6 +699,154 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       ctx.answerCbQuery();
     });
 
+    // ===== Channel Info =====
+    this.bot.command("channelinfo", async (ctx) => {
+      if (!ctx.from || !ADMINS.includes(ctx.from.id)) return;
+      const args = ctx.message.text.split(/\s+/);
+      if (args.length < 2) {
+        return ctx.reply("⚠️ Usage: /channelinfo <channel_id> [max_id]");
+      }
+
+      this.targetChannelId = args[1];
+      
+      // If max_id is provided manually
+      if (args[2]) {
+        const maxId = parseInt(args[2], 10);
+        if (!isNaN(maxId)) {
+          this.targetChannelMaxId = maxId;
+          return ctx.reply(
+            `✅ Target channel set to: ${this.targetChannelId}\nMax ID set to: ${this.targetChannelMaxId}`
+          );
+        }
+      }
+
+      // Auto-detect max ID
+      const statusMsg = await ctx.reply("🔄 Auto-detecting max ID... Please wait.");
+      let maxId = 0;
+
+      try {
+        // Strategy 1: Try to send a message (if admin)
+        try {
+          const testMsg = await ctx.telegram.sendMessage(this.targetChannelId, "🔍 Calibrating...", { disable_notification: true });
+          maxId = testMsg.message_id;
+          await ctx.telegram.deleteMessage(this.targetChannelId, maxId).catch(() => {});
+        } catch (e) {
+          // Strategy 2: Probing (Read-only / Guest)
+          const checkId = async (id: number) => {
+            try {
+              const msg = await ctx.telegram.copyMessage(ctx.chat.id, this.targetChannelId!, id, { disable_notification: true });
+              await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+              return true;
+            } catch {
+              return false;
+            }
+          };
+
+          let current = 100;
+          let lastValid = 0;
+
+          // Exponential search
+          while (true) {
+            if (await checkId(current)) {
+              lastValid = current;
+              current *= 2;
+              if (current > 1000000) break; 
+            } else {
+              break;
+            }
+          }
+
+          // Binary search refinement
+          let low = lastValid;
+          let high = current;
+          
+          for (let i = 0; i < 5; i++) {
+             const mid = Math.floor((low + high) / 2);
+             if (mid <= low) break;
+             if (await checkId(mid)) {
+               low = mid;
+             } else {
+               high = mid;
+             }
+          }
+          maxId = high;
+        }
+
+        this.targetChannelMaxId = maxId;
+        return ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          undefined,
+          `✅ Target channel set to: ${this.targetChannelId}\nMax ID auto-detected: ${this.targetChannelMaxId}`
+        );
+      } catch (err: any) {
+        return ctx.telegram.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          undefined,
+          `⚠️ Auto-detection failed. Please provide max_id manually.\nError: ${err.message}`
+        );
+      }
+    });
+
+    // ===== Random Info Button (Persistent) =====
+    this.bot.hears("🎲 Random Info", async (ctx) => {
+      ctx.deleteMessage().catch(() => {}); // Try to delete user trigger message
+
+      if (!this.targetChannelId || !this.targetChannelMaxId) {
+        const msg = await ctx.reply("⚠️ Random movie source not configured. Use /channelinfo first.");
+        setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {}), 3000);
+        return;
+      }
+
+      const userId = ctx.from.id;
+      let stats = this.userDownloads.get(userId);
+      if (!stats) {
+        stats = {
+          downloadsToday: 0,
+          lastResetDate: new Date().toISOString().split("T")[0],
+        };
+        this.userDownloads.set(userId, stats);
+      }
+
+      if (stats.processingRandom) return;
+      stats.processingRandom = true;
+
+      try {
+        // Delete previous message if exists
+        if (stats.lastRandomMessageId) {
+          try {
+            await ctx.telegram.deleteMessage(ctx.chat.id, stats.lastRandomMessageId);
+          } catch (err) {
+            // Ignore error (message might be too old or already deleted)
+          }
+          stats.lastRandomMessageId = undefined;
+        }
+
+        // Try to fetch a random post (retry a few times if empty/deleted)
+        let sentMessageId: number | null = null;
+        for (let i = 0; i < 5; i++) {
+          const randomId = Math.floor(Math.random() * this.targetChannelMaxId) + 1;
+          try {
+            const msg = await ctx.telegram.copyMessage(ctx.chat.id, this.targetChannelId, randomId);
+            sentMessageId = msg.message_id;
+            break; // Success
+          } catch (err) {
+            // Continue retrying
+          }
+        }
+
+        if (sentMessageId) {
+          stats.lastRandomMessageId = sentMessageId;
+        } else {
+          const msg = await ctx.reply("⚠️ Failed to find a valid movie. Please try again.");
+          setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {}), 3000);
+        }
+      } finally {
+        stats.processingRandom = false;
+      }
+    });
+
     // ===== Help =====
     this.bot.command("help", async (ctx) => {
       return ctx.reply(
@@ -750,7 +891,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       await this.userService.saveIfNotExists(tgId, username);
 
       await ctx.reply(
-        "👋 Welcome! Send a movie code or use the /help command."
+        // "👋 Welcome! Send a movie code or use the /help command."
+        "👋 Welcome! Send a movie code or use the /help command.",
+        {
+          reply_markup: {
+            keyboard: [[{ text: "🎲 Random Info" }]],
+            resize_keyboard: true,
+            is_persistent: true,
+          },
+        }
       );
     });
   }

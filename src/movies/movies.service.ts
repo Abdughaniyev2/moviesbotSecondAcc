@@ -40,4 +40,10 @@ export class MoviesService {
   async update(movie: Movie): Promise<Movie> {
     return this.moviesRepo.save(movie);
   }
-}
+
+  // async findAll(): Promise<Movie[]> { // not needed now
+  //   return this.moviesRepo.find();
+  // }
+} 
+
+ 
