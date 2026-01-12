@@ -8,6 +8,8 @@ import { Watchlist } from './watchlist/watchlist.entity';
 import { WatchlistService } from './watchlist/watchlist.service';
 import * as dotenv from 'dotenv';
 import { UserModule } from './users/user.module';
+import { UserStats } from './user-stats.entity';
+import { BotSettings } from './bot-settings.entity';
 dotenv.config()
 
 @Module({
@@ -27,7 +29,8 @@ dotenv.config()
         }),
         UserModule,
 
-        TypeOrmModule.forFeature([Movie, Watchlist]),
+        // TypeOrmModule.forFeature([Movie, Watchlist]),
+        TypeOrmModule.forFeature([Movie, Watchlist, UserStats, BotSettings]),
 
     ],
     providers: [BotService, MoviesService, WatchlistService],
@@ -35,4 +38,3 @@ dotenv.config()
 })
 
 export class AppModule { }
-

@@ -1,8 +1,12 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
 import { Telegraf } from "telegraf";
 import { MoviesService } from "./movies/movies.service";
 import { WatchlistService } from "./watchlist/watchlist.service";
 import { UserService } from "./users/user.service";
+import {UserStats}  from "./user-stats.entity";
+import { BotSettings } from "./bot-settings.entity";
 import * as dotenv from "dotenv";
 
 dotenv.config();
@@ -43,8 +47,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       processingRandom?: boolean;
     }
   >();
+  private processingRandomUsers = new Set<number>();
 
   constructor(
+    @InjectRepository(BotSettings)
+    private readonly botSettingsRepository: Repository<BotSettings>,
+    @InjectRepository(UserStats)
+    private readonly userStatsRepository: Repository<UserStats>,
     private readonly moviesService: MoviesService,
     private readonly watchlistService: WatchlistService,
     private readonly userService: UserService
@@ -58,6 +67,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!this.bot) return;
 
     await this.cacheUsers();
+    await this.loadSettings();
     this.registerHandlers();
 
     const launch = async () => {
@@ -221,22 +231,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       if (!isAdmin) {
         const userId = ctx.from.id;
         const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+        let stats = await this.getOrCreateStats(userId);
 
-        let stats = this.userDownloads.get(userId);
-        if (!stats || stats.lastResetDate !== today) {
-          const customLimit = stats?.customLimit;
-          const customLimitExpires = stats?.customLimitExpires;
-          const customProtectContent = stats?.customProtectContent;
-          const customProtectContentExpires = stats?.customProtectContentExpires;
-          stats = {
-            downloadsToday: 0,
-            lastResetDate: today,
-            customLimit,
-            customLimitExpires,
-            customProtectContent,
-            customProtectContentExpires,
-          };
-          this.userDownloads.set(userId, stats);
+        if (stats.lastResetDate !== today) {
+          stats.downloadsToday = 0;
+          stats.lastResetDate = today;
+
+          // Check expirations
+          if (stats.customLimitExpires && stats.customLimitExpires < new Date()) {
+            stats.customLimit = null;
+            stats.customLimitExpires = null;
+          }
+          if (stats.customProtectContentExpires && stats.customProtectContentExpires < new Date()) {
+            stats.customProtectContent = null;
+            stats.customProtectContentExpires = null;
+          }
+          await this.userStatsRepository.save(stats);
         }
 
         let currentLimit = this.dailyLimit;
@@ -247,9 +257,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         ) {
           currentLimit = stats.customLimit;
         } else if (stats.customLimit) {
-          // Clean up expired custom limit
-          delete stats.customLimit;
-          delete stats.customLimitExpires;
+          stats.customLimit = null;
+          stats.customLimitExpires = null;
+          await this.userStatsRepository.save(stats);
         }
 
         if (stats.downloadsToday >= currentLimit) {
@@ -258,9 +268,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
             { parse_mode: "HTML" }
           );
         }
-       
-
+     
         stats.downloadsToday++;
+        await this.userStatsRepository.save(stats);
         await this.userService.saveIfNotExists(userId.toString(), ctx.from.username);
       }
 
@@ -271,13 +281,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         protectContent = false;
       } else {
         const userId = ctx.from.id;
-        const stats = this.userDownloads.get(userId);
+        // const stats = this.userDownloads.get(userId);
+        const stats = await this.getOrCreateStats(userId);
         if (stats?.customProtectContent === false) {
           if (stats.customProtectContentExpires && stats.customProtectContentExpires > new Date()) {
             protectContent = false;
           } else if (stats) {
-            delete stats.customProtectContent;
-            delete stats.customProtectContentExpires;
+            stats.customProtectContent = null;
+            stats.customProtectContentExpires = null;
+            await this.userStatsRepository.save(stats);
           }
         }
       }
@@ -403,6 +415,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       if (this.forceJoinChannels.length > 0) this.forceJoinActive = true;
+      await this.saveSettings();
 
       if (added.length) {
         ctx.reply(
@@ -448,6 +461,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       if (this.forceJoinChannels.length === 0) {
         this.forceJoinActive = false;
       }
+      await this.saveSettings();
 
       let reply = "";
       if (removed.length) reply += `🗑️ Removed: ${removed.join(", ")}\n`;
@@ -543,18 +557,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       const userId = targetId;
       const today = new Date().toISOString().split("T")[0];
-
-      const stats = this.userDownloads.get(userId) || {
-        downloadsToday: 0,
-        lastResetDate: today,
-      };
+      const stats = await this.getOrCreateStats(userId);
 
       const expires = new Date();
       expires.setDate(expires.getDate() + days);
 
       stats.customLimit = newLimit;
       stats.customLimitExpires = expires;
-      this.userDownloads.set(userId, stats);
+      // this.userDownloads.set(userId, stats);
+      await this.userStatsRepository.save(stats);
 
       return ctx.reply(`✅ Limit for ID <code>${userId}</code> has been set to ${newLimit} for ${days} day(s).\n<blockquote>Expires on: ${expires.toLocaleString()}</blockquote>`,{ parse_mode: "HTML" });
       
@@ -574,10 +585,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         return ctx.reply("⚠️ Invalid User ID.");
       }
 
-      const stats = this.userDownloads.get(userId);
+      // const stats = this.userDownloads.get(userId);
+      const stats = await this.getOrCreateStats(userId);
       if (stats) {
-        delete stats.customProtectContent;
-        delete stats.customProtectContentExpires;
+        stats.customProtectContent = null;
+        stats.customProtectContentExpires = null;
+        await this.userStatsRepository.save(stats);
       }
 
       return ctx.reply(
@@ -601,17 +614,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       const today = new Date().toISOString().split("T")[0];
-      let stats = this.userDownloads.get(userId);
-      if (!stats) {
-        stats = { downloadsToday: 0, lastResetDate: today };
-        this.userDownloads.set(userId, stats);
-      }
+      const stats = await this.getOrCreateStats(userId);
 
       const expires = new Date();
       expires.setDate(expires.getDate() + days);
 
       stats.customProtectContent = false;
       stats.customProtectContentExpires = expires;
+      await this.userStatsRepository.save(stats);
 
       return ctx.reply(
         `✅ Protection DISABLED (VIP) for ID ${userId} for ${days} day(s).`
@@ -714,6 +724,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         const maxId = parseInt(args[2], 10);
         if (!isNaN(maxId)) {
           this.targetChannelMaxId = maxId;
+          await this.saveSettings();
           return ctx.reply(
             `✅ Target channel set to: ${this.targetChannelId}\nMax ID set to: ${this.targetChannelMaxId}`
           );
@@ -773,6 +784,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         }
 
         this.targetChannelMaxId = maxId;
+        await this.saveSettings();
         return ctx.telegram.editMessageText(
           ctx.chat.id,
           statusMsg.message_id,
@@ -800,17 +812,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
 
       const userId = ctx.from.id;
-      let stats = this.userDownloads.get(userId);
-      if (!stats) {
-        stats = {
-          downloadsToday: 0,
-          lastResetDate: new Date().toISOString().split("T")[0],
-        };
-        this.userDownloads.set(userId, stats);
-      }
+      const stats = await this.getOrCreateStats(userId);
 
-      if (stats.processingRandom) return;
-      stats.processingRandom = true;
+      if (this.processingRandomUsers.has(userId)) return;
+      this.processingRandomUsers.add(userId);
 
       try {
         // Delete previous message if exists
@@ -820,7 +825,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           } catch (err) {
             // Ignore error (message might be too old or already deleted)
           }
-          stats.lastRandomMessageId = undefined;
+          // stats.lastRandomMessageId = undefined;
+          stats.lastRandomMessageId = null;
+          await this.userStatsRepository.save(stats);
         }
 
         // Try to fetch a random post (retry a few times if empty/deleted)
@@ -838,12 +845,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
         if (sentMessageId) {
           stats.lastRandomMessageId = sentMessageId;
+          await this.userStatsRepository.save(stats);
         } else {
           const msg = await ctx.reply("⚠️ Failed to find a valid movie. Please try again.");
           setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {}), 3000);
         }
       } finally {
-        stats.processingRandom = false;
+        // stats.processingRandom = false;
+        this.processingRandomUsers.delete(userId);
       }
     });
 
@@ -1179,6 +1188,44 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  private async loadSettings() {
+    const settings = await this.botSettingsRepository.findOneBy({ id: 1 });
+    if (settings) {
+      this.forceJoinActive = settings.forceJoinActive;
+      this.forceJoinChannels = settings.forceJoinChannels;
+      this.targetChannelId = settings.targetChannelId;
+      this.targetChannelMaxId = settings.targetChannelMaxId;
+      console.log("⚙️ Bot settings loaded from DB");
+    } else {
+      // Initialize DB with defaults if empty
+      await this.saveSettings();
+    }
+  }
+
+  private async saveSettings() {
+    const settings = new BotSettings();
+    settings.id = 1;
+    settings.forceJoinActive = this.forceJoinActive;
+    settings.forceJoinChannels = this.forceJoinChannels;
+    settings.targetChannelId = this.targetChannelId;
+    settings.targetChannelMaxId = this.targetChannelMaxId;
+    await this.botSettingsRepository.save(settings);
+  }
+
+  private async getOrCreateStats(userId: number): Promise<UserStats> {
+    const idStr = userId.toString();
+    let stats = await this.userStatsRepository.findOneBy({ userId: idStr });
+    if (!stats) {
+      stats = this.userStatsRepository.create({
+        userId: idStr,
+        downloadsToday: 0,
+        lastResetDate: new Date().toISOString().split("T")[0],
+      });
+      await this.userStatsRepository.save(stats);
+    }
+    return stats;
+  }
+
   private parseCaption(caption: string): ParsedCaption | null {
     // Split into lines but preserve empty lines
     const allLines = caption.split("\n");
@@ -1226,23 +1273,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           const descLines = [descMatch[1], ...allLines.slice(i + 1)];
           // Preserve original line breaks, empty lines, and quotes
           description = descLines.join("\n");
-
-          // Calculate character offset where description content starts
-          // currentOffset points to start of "Description: ..." line
-          // We add the length of "Description: " prefix
           const prefixMatch = originalLine.match(/^Description:\s*/i);
           if (prefixMatch) {
-            // Add offset of the prefix
-            // Note: descriptionStartOffset is used to slice the original full caption
-            // parsed.descriptionStartOffset = currentOffset + prefixMatch[0].length;
-            // Actually, let's store the offset relative to the full caption
-            // We need to be careful about \n chars. split('\n') consumes them.
-            // currentOffset tracks them.
-            
-            // The logic below for descriptionStartOffset:
-            // currentOffset is the index of the start of this line.
-            // prefixMatch[0].length is the length of "Description: "
-            // So content starts at currentOffset + prefixMatch[0].length
             
             // We return this so channel_post can slice the raw caption and entities
             return { 
